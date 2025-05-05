@@ -9,14 +9,16 @@ import (
 	"github.com/gdamore/tcell/v2"
 
 	"pow/pkg/config"
+	"pow/pkg/syntax"
 )
 
 // Editor represents the text editor application
 type Editor struct {
-	screen   tcell.Screen
-	filePath string
-	content  []string
-	theme    *config.Theme
+	screen      tcell.Screen
+	filePath    string
+	content     []string
+	theme       *config.Theme
+	highlighter *syntax.Highlighter
 
 	// Editing state
 	cursorX  int
@@ -65,16 +67,20 @@ func NewEditor(filePath string) (*Editor, error) {
 		return nil, err
 	}
 
+	// Initialize syntax highlighter
+	highlighter := syntax.NewHighlighter(filePath)
+
 	// Create editor instance
 	editor := &Editor{
-		screen:   screen,
-		filePath: filePath,
-		content:  content,
-		theme:    theme,
-		cursorX:  0,
-		cursorY:  0,
-		modified: !fileExists, // Mark as modified if it's a new file
-		quit:     make(chan struct{}),
+		screen:      screen,
+		filePath:    filePath,
+		content:     content,
+		theme:       theme,
+		highlighter: highlighter,
+		cursorX:     0,
+		cursorY:     0,
+		modified:    !fileExists, // Mark as modified if it's a new file
+		quit:        make(chan struct{}),
 	}
 
 	return editor, nil
@@ -128,13 +134,25 @@ func (e *Editor) draw() {
 		}
 	}
 
+	// Get the entire file content as a single string for syntax highlighting
+	content := strings.Join(e.content, "\n")
+
+	// Highlight the entire content
+	highlightedLines := e.highlighter.HighlightContent(content)
+
 	// Render content
 	for y, line := range e.content {
 		if y >= height-1 { // Leave the last line for status
 			break
 		}
 
-		// Draw the line
+		// Get the highlighted segments for this line
+		var colorSegments []syntax.ColorSegment
+		if y < len(highlightedLines) {
+			colorSegments = highlightedLines[y].Colors
+		}
+
+		// Draw the line with syntax highlighting
 		for x, r := range line {
 			if x >= width {
 				break
@@ -145,7 +163,19 @@ func (e *Editor) draw() {
 				continue
 			}
 
-			e.screen.SetContent(x, y, r, nil, defaultStyle)
+			// Default to using the default style
+			style := defaultStyle
+
+			// Check if we have a highlighted segment that includes this position
+			for _, segment := range colorSegments {
+				if x >= segment.StartCol && x < segment.EndCol {
+					// Apply the highlight style but preserve background color
+					style = segment.Style.Background(e.theme.BackgroundColor)
+					break
+				}
+			}
+
+			e.screen.SetContent(x, y, r, nil, style)
 		}
 	}
 
@@ -185,7 +215,9 @@ func (e *Editor) draw() {
 		modifiedIndicator = "*"
 	}
 
-	statusText := fmt.Sprintf(" %s%s [%d:%d]", modifiedIndicator, e.filePath, e.cursorY+1, e.cursorX+1)
+	// Get file type from highlighter
+	fileType := e.highlighter.GetFileType()
+	statusText := fmt.Sprintf(" %s%s [%s] [%d:%d]", modifiedIndicator, e.filePath, fileType, e.cursorY+1, e.cursorX+1)
 
 	for x, r := range statusText {
 		if x < width {
@@ -285,28 +317,29 @@ func (e *Editor) handleKeyEvent(ev *tcell.EventKey) bool {
 
 	case tcell.KeyBackspace, tcell.KeyBackspace2:
 		if e.cursorX > 0 {
-			// Remove character before cursor
+			// Delete the character before the cursor
 			currentLine := e.content[e.cursorY]
 			e.content[e.cursorY] = currentLine[:e.cursorX-1] + currentLine[e.cursorX:]
 			e.cursorX--
 			e.modified = true
 		} else if e.cursorY > 0 {
-			// At beginning of line, join with previous line
+			// We're at the beginning of a line, merge with the previous line
+			previousLine := e.content[e.cursorY-1]
 			currentLine := e.content[e.cursorY]
-			prevLine := e.content[e.cursorY-1]
 
-			// Set cursor position to end of previous line
-			e.cursorX = len(prevLine)
+			// Set cursor to the end of the previous line
+			e.cursorX = len(previousLine)
 
-			// Join lines
-			e.content[e.cursorY-1] = prevLine + currentLine
+			// Merge the lines
+			e.content[e.cursorY-1] = previousLine + currentLine
 
-			// Remove current line
+			// Remove the current line
 			newContent := make([]string, len(e.content)-1)
 			copy(newContent, e.content[:e.cursorY])
 			copy(newContent[e.cursorY:], e.content[e.cursorY+1:])
 			e.content = newContent
 
+			// Move cursor up to the previous line
 			e.cursorY--
 			e.modified = true
 		}
@@ -316,32 +349,38 @@ func (e *Editor) handleKeyEvent(ev *tcell.EventKey) bool {
 		if e.cursorY < len(e.content) {
 			currentLine := e.content[e.cursorY]
 			if e.cursorX < len(currentLine) {
-				// Remove character at cursor
+				// Delete character at cursor
 				e.content[e.cursorY] = currentLine[:e.cursorX] + currentLine[e.cursorX+1:]
 				e.modified = true
 			} else if e.cursorY < len(e.content)-1 {
-				// At end of line, join with next line
+				// At the end of the line, merge with next line
 				nextLine := e.content[e.cursorY+1]
-
-				// Join lines
 				e.content[e.cursorY] = currentLine + nextLine
 
-				// Remove next line
+				// Remove the next line
 				newContent := make([]string, len(e.content)-1)
 				copy(newContent, e.content[:e.cursorY+1])
 				copy(newContent[e.cursorY+1:], e.content[e.cursorY+2:])
 				e.content = newContent
-
 				e.modified = true
 			}
 		}
 		return true
-	}
 
-	// Handle regular character input
-	if ev.Key() == tcell.KeyRune {
+	case tcell.KeyTab:
+		// Insert a tab (4 spaces for now)
+		currentLine := e.content[e.cursorY]
+		if e.cursorX > len(currentLine) {
+			e.content[e.cursorY] = currentLine + strings.Repeat(" ", e.cursorX-len(currentLine)) + "    "
+		} else {
+			e.content[e.cursorY] = currentLine[:e.cursorX] + "    " + currentLine[e.cursorX:]
+		}
+		e.cursorX += 4
+		e.modified = true
+		return true
+
+	case tcell.KeyRune:
 		r := ev.Rune()
-
 		// Insert the character at cursor position
 		currentLine := e.content[e.cursorY]
 		newLine := ""
@@ -379,6 +418,9 @@ func (e *Editor) saveFile() {
 	}
 
 	e.modified = false
+
+	// Update highlighter in case file type changed
+	e.highlighter = syntax.NewHighlighter(e.filePath)
 }
 
 // promptForFilename asks the user for a filename to save
@@ -478,46 +520,45 @@ func (e *Editor) promptSaveBeforeExit() bool {
 		}
 
 		// Draw message
-		for i, c := range message {
-			msgX := dialogX + (dialogWidth-len(message))/2 + i
-			if msgX >= 0 && msgX < width {
-				e.screen.SetContent(msgX, dialogY+1, c, nil, tcell.StyleDefault.
+		for i, r := range message {
+			x := dialogX + (dialogWidth-len(message))/2 + i
+			y := dialogY + 1
+			if x >= 0 && x < width && y >= 0 && y < height {
+				e.screen.SetContent(x, y, r, nil, tcell.StyleDefault.
 					Foreground(tcell.ColorBlack).
 					Background(tcell.ColorWhite))
 			}
 		}
 
 		// Draw options
-		totalOptionsWidth := 0
+		optionsWidth := 0
 		for _, opt := range options {
-			totalOptionsWidth += len(opt) + 2 // +2 for spacing
+			optionsWidth += len(opt) + 2 // Add space between options
 		}
-
-		optionX := dialogX + (dialogWidth-totalOptionsWidth)/2
+		optionsX := dialogX + (dialogWidth-optionsWidth)/2
 
 		for i, opt := range options {
-			style := tcell.StyleDefault.
-				Foreground(tcell.ColorBlack).
-				Background(tcell.ColorWhite)
+			for j, r := range opt {
+				x := optionsX + j
+				y := dialogY + 3
 
-			if i == selected {
-				style = tcell.StyleDefault.
-					Foreground(tcell.ColorWhite).
-					Background(tcell.ColorBlue)
-			}
+				style := tcell.StyleDefault
+				if i == selected {
+					style = style.Foreground(tcell.ColorWhite).Background(tcell.ColorBlue)
+				} else {
+					style = style.Foreground(tcell.ColorBlack).Background(tcell.ColorWhite)
+				}
 
-			for j, c := range opt {
-				if optionX+j < width {
-					e.screen.SetContent(optionX+j, dialogY+3, c, nil, style)
+				if x >= 0 && x < width && y >= 0 && y < height {
+					e.screen.SetContent(x, y, r, nil, style)
 				}
 			}
-
-			optionX += len(opt) + 2
+			optionsX += len(opt) + 2 // Move to next option position
 		}
 
 		e.screen.Show()
 
-		// Wait for key event
+		// Handle input
 		ev := e.screen.PollEvent()
 		switch ev := ev.(type) {
 		case *tcell.EventKey:
@@ -527,20 +568,17 @@ func (e *Editor) promptSaveBeforeExit() bool {
 			case tcell.KeyRight:
 				selected = (selected + 1) % len(options)
 			case tcell.KeyEnter:
-				switch options[selected] {
-				case "Yes":
+				switch selected {
+				case 0: // Yes
 					e.saveFile()
-					if !e.modified { // Only exit if save was successful
-						close(e.quit)
-						e.screen.Fini()
-						return false
-					}
-					return true
-				case "No":
 					close(e.quit)
 					e.screen.Fini()
 					return false
-				case "Cancel":
+				case 1: // No
+					close(e.quit)
+					e.screen.Fini()
+					return false
+				case 2: // Cancel
 					return true
 				}
 			case tcell.KeyEscape:
@@ -550,67 +588,34 @@ func (e *Editor) promptSaveBeforeExit() bool {
 	}
 }
 
-// showMessage displays a message to the user
+// showMessage displays a message at the bottom of the screen
 func (e *Editor) showMessage(message string) {
 	width, height := e.screen.Size()
 
-	// Display message in the middle of the screen
-	dialogWidth := len(message) + 4
-	dialogHeight := 5
-	if dialogWidth < 20 {
-		dialogWidth = 20
+	// Display message at the status line
+	for x := 0; x < width; x++ {
+		e.screen.SetContent(x, height-1, ' ', nil, tcell.StyleDefault.
+			Foreground(tcell.ColorYellow).
+			Background(tcell.ColorBlue))
 	}
 
-	dialogX := (width - dialogWidth) / 2
-	dialogY := (height - dialogHeight) / 2
-
-	// Draw dialog box
-	for y := dialogY; y < dialogY+dialogHeight; y++ {
-		for x := dialogX; x < dialogX+dialogWidth; x++ {
-			if x >= 0 && x < width && y >= 0 && y < height {
-				style := tcell.StyleDefault.
-					Foreground(tcell.ColorBlack).
-					Background(tcell.ColorWhite)
-
-				e.screen.SetContent(x, y, ' ', nil, style)
-			}
-		}
-	}
-
-	// Draw message
-	for i, c := range message {
-		msgX := dialogX + (dialogWidth-len(message))/2 + i
-		if msgX >= 0 && msgX < width {
-			e.screen.SetContent(msgX, dialogY+1, c, nil, tcell.StyleDefault.
-				Foreground(tcell.ColorBlack).
-				Background(tcell.ColorWhite))
-		}
-	}
-
-	// Draw OK button
-	okText := "OK"
-	okX := dialogX + (dialogWidth-len(okText))/2
-
-	style := tcell.StyleDefault.
-		Foreground(tcell.ColorWhite).
-		Background(tcell.ColorBlue)
-
-	for i, c := range okText {
-		if okX+i < width {
-			e.screen.SetContent(okX+i, dialogY+3, c, nil, style)
+	// Write message
+	for i, r := range message {
+		if i < width {
+			e.screen.SetContent(i, height-1, r, nil, tcell.StyleDefault.
+				Foreground(tcell.ColorYellow).
+				Background(tcell.ColorBlue))
 		}
 	}
 
 	e.screen.Show()
 
-	// Wait for any key press
+	// Wait for a key event to dismiss the message
 	for {
 		ev := e.screen.PollEvent()
-		switch ev := ev.(type) {
+		switch ev.(type) {
 		case *tcell.EventKey:
-			if ev.Key() == tcell.KeyEnter || ev.Key() == tcell.KeyEscape {
-				return
-			}
+			return
 		}
 	}
 }
