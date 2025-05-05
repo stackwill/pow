@@ -23,6 +23,7 @@ type Editor struct {
 	// Editing state
 	cursorX  int
 	cursorY  int
+	scrollY  int // Track vertical scroll position
 	modified bool
 	quit     chan struct{}
 }
@@ -51,7 +52,7 @@ func NewEditor(filePath string) (*Editor, error) {
 	}
 
 	// Load theme configuration
-	theme, themeErr := config.LoadTheme(filepath.Join("config", "theme.conf"))
+	theme, themeErr := config.LoadTheme(filepath.Join("config", "config.conf"))
 	if themeErr != nil {
 		// Just print the error, don't abort - we'll use the default theme
 		fmt.Fprintln(os.Stderr, themeErr)
@@ -79,6 +80,7 @@ func NewEditor(filePath string) (*Editor, error) {
 		highlighter: highlighter,
 		cursorX:     0,
 		cursorY:     0,
+		scrollY:     0,
 		modified:    !fileExists, // Mark as modified if it's a new file
 		quit:        make(chan struct{}),
 	}
@@ -134,22 +136,33 @@ func (e *Editor) draw() {
 		}
 	}
 
+	// Ensure cursor is visible
+	e.ensureVisibleCursor()
+
 	// Get the entire file content as a single string for syntax highlighting
 	content := strings.Join(e.content, "\n")
 
 	// Highlight the entire content
 	highlightedLines := e.highlighter.HighlightContent(content)
 
-	// Render content
-	for y, line := range e.content {
-		if y >= height-1 { // Leave the last line for status
-			break
-		}
+	// Calculate the visible range of lines
+	visibleStart := e.scrollY
+	visibleEnd := e.scrollY + (height - 1) // Leave space for status line
+	if visibleEnd > len(e.content) {
+		visibleEnd = len(e.content)
+	}
+
+	// Render visible content
+	for i := visibleStart; i < visibleEnd; i++ {
+		// Calculate screen position
+		y := i - e.scrollY
+
+		line := e.content[i]
 
 		// Get the highlighted segments for this line
 		var colorSegments []syntax.ColorSegment
-		if y < len(highlightedLines) {
-			colorSegments = highlightedLines[y].Colors
+		if i < len(highlightedLines) {
+			colorSegments = highlightedLines[i].Colors
 		}
 
 		// Draw the line with syntax highlighting
@@ -159,7 +172,7 @@ func (e *Editor) draw() {
 			}
 
 			// Skip cursor position, we'll draw it separately
-			if y == e.cursorY && x == e.cursorX {
+			if i == e.cursorY && x == e.cursorX {
 				continue
 			}
 
@@ -179,8 +192,11 @@ func (e *Editor) draw() {
 		}
 	}
 
-	// Draw cursor
-	if e.cursorY < height-1 {
+	// Draw cursor (only if it's in the visible area)
+	if e.cursorY >= e.scrollY && e.cursorY < e.scrollY+height-1 {
+		// Get cursor screen position
+		cursorScreenY := e.cursorY - e.scrollY
+
 		// Get char under cursor
 		var cursorChar rune = ' ' // Default to space
 		if e.cursorY < len(e.content) {
@@ -196,7 +212,7 @@ func (e *Editor) draw() {
 			Background(e.theme.CursorColor)
 
 		// Draw the cursor
-		e.screen.SetContent(e.cursorX, e.cursorY, cursorChar, nil, cursorStyle)
+		e.screen.SetContent(e.cursorX, cursorScreenY, cursorChar, nil, cursorStyle)
 	}
 
 	// Draw status line
@@ -217,7 +233,19 @@ func (e *Editor) draw() {
 
 	// Get file type from highlighter
 	fileType := e.highlighter.GetFileType()
-	statusText := fmt.Sprintf(" %s%s [%s] [%d:%d]", modifiedIndicator, e.filePath, fileType, e.cursorY+1, e.cursorX+1)
+
+	// Show scroll position information
+	scrollInfo := ""
+	if len(e.content) > height-1 {
+		totalLines := len(e.content)
+		visibleStart := e.scrollY + 1
+		visibleEnd := min(e.scrollY+height-1, totalLines)
+		scrollPercentage := 100 * visibleEnd / totalLines
+		scrollInfo = fmt.Sprintf(" [%d-%d/%d %d%%]", visibleStart, visibleEnd, totalLines, scrollPercentage)
+	}
+
+	statusText := fmt.Sprintf(" %s%s [%s] [%d:%d]%s",
+		modifiedIndicator, e.filePath, fileType, e.cursorY+1, e.cursorX+1, scrollInfo)
 
 	for x, r := range statusText {
 		if x < width {
@@ -231,6 +259,10 @@ func (e *Editor) draw() {
 
 // handleKeyEvent processes keyboard input events
 func (e *Editor) handleKeyEvent(ev *tcell.EventKey) bool {
+	// Get screen dimensions
+	_, height := e.screen.Size()
+	contentHeight := height - 1 // Subtract status line
+
 	// Handle key events
 	switch ev.Key() {
 	case tcell.KeyCtrlC: // Legacy exit - immediately quit
@@ -287,6 +319,46 @@ func (e *Editor) handleKeyEvent(ev *tcell.EventKey) bool {
 			// Move to beginning of next line
 			e.cursorY++
 			e.cursorX = 0
+		}
+		return true
+
+	case tcell.KeyPgUp:
+		// Move cursor up by a page
+		if e.cursorY > 0 {
+			e.cursorY -= contentHeight
+			if e.cursorY < 0 {
+				e.cursorY = 0
+			}
+			// Make sure cursorX is valid for the new line
+			if e.cursorX > len(e.content[e.cursorY]) {
+				e.cursorX = len(e.content[e.cursorY])
+			}
+		}
+		return true
+
+	case tcell.KeyPgDn:
+		// Move cursor down by a page
+		if e.cursorY < len(e.content)-1 {
+			e.cursorY += contentHeight
+			if e.cursorY >= len(e.content) {
+				e.cursorY = len(e.content) - 1
+			}
+			// Make sure cursorX is valid for the new line
+			if e.cursorX > len(e.content[e.cursorY]) {
+				e.cursorX = len(e.content[e.cursorY])
+			}
+		}
+		return true
+
+	case tcell.KeyHome:
+		// Move to beginning of line
+		e.cursorX = 0
+		return true
+
+	case tcell.KeyEnd:
+		// Move to end of line
+		if e.cursorY < len(e.content) {
+			e.cursorX = len(e.content[e.cursorY])
 		}
 		return true
 
@@ -428,6 +500,19 @@ func (e *Editor) promptForFilename() {
 	// Save current content to restore it later
 	width, height := e.screen.Size()
 
+	// Create styles
+	promptStyle := tcell.StyleDefault.
+		Foreground(e.theme.DialogButtonForeground).
+		Background(e.theme.DialogButtonBackground)
+
+	inputStyle := tcell.StyleDefault.
+		Foreground(e.theme.DialogForeground).
+		Background(e.theme.DialogBackground)
+
+	cursorStyle := tcell.StyleDefault.
+		Foreground(e.theme.DialogBackground).
+		Background(e.theme.DialogSelectedBackground)
+
 	// Create an input field at the bottom of the screen
 	prompt := "Enter filename: "
 	input := ""
@@ -436,28 +521,20 @@ func (e *Editor) promptForFilename() {
 	for {
 		// Clear the status line
 		for x := 0; x < width; x++ {
-			e.screen.SetContent(x, height-1, ' ', nil, tcell.StyleDefault.
-				Foreground(tcell.ColorWhite).
-				Background(tcell.ColorBlue))
+			e.screen.SetContent(x, height-1, ' ', nil, inputStyle)
 		}
 
 		// Display prompt and input
 		for i, c := range prompt {
-			e.screen.SetContent(i, height-1, c, nil, tcell.StyleDefault.
-				Foreground(tcell.ColorWhite).
-				Background(tcell.ColorBlue))
+			e.screen.SetContent(i, height-1, c, nil, promptStyle)
 		}
 
 		for i, c := range input {
-			e.screen.SetContent(len(prompt)+i, height-1, c, nil, tcell.StyleDefault.
-				Foreground(tcell.ColorWhite).
-				Background(tcell.ColorBlue))
+			e.screen.SetContent(len(prompt)+i, height-1, c, nil, inputStyle)
 		}
 
 		// Show cursor
-		e.screen.SetContent(len(prompt)+len(input), height-1, ' ', nil, tcell.StyleDefault.
-			Foreground(tcell.ColorBlue).
-			Background(tcell.ColorWhite))
+		e.screen.SetContent(len(prompt)+len(input), height-1, ' ', nil, cursorStyle)
 
 		e.screen.Show()
 
@@ -502,18 +579,37 @@ func (e *Editor) promptSaveBeforeExit() bool {
 		dialogX := (width - dialogWidth) / 2
 		dialogY := (height - dialogHeight) / 2
 
+		// Create dialog styles
+		dialogStyle := tcell.StyleDefault.
+			Foreground(e.theme.DialogForeground).
+			Background(e.theme.DialogBackground)
+
+		borderStyle := tcell.StyleDefault.
+			Foreground(e.theme.DialogBorderColor).
+			Background(e.theme.DialogBackground)
+
+		textStyle := tcell.StyleDefault.
+			Foreground(e.theme.DialogForeground).
+			Background(e.theme.DialogBackground)
+
+		buttonStyle := tcell.StyleDefault.
+			Foreground(e.theme.DialogButtonForeground).
+			Background(e.theme.DialogButtonBackground)
+
+		selectedStyle := tcell.StyleDefault.
+			Foreground(e.theme.DialogSelectedForeground).
+			Background(e.theme.DialogSelectedBackground)
+
+		// Draw dialog background and border
 		for y := dialogY; y < dialogY+dialogHeight; y++ {
 			for x := dialogX; x < dialogX+dialogWidth; x++ {
 				if x >= 0 && x < width && y >= 0 && y < height {
-					style := tcell.StyleDefault.
-						Foreground(tcell.ColorBlack).
-						Background(tcell.ColorWhite)
-
-					// Border
-					if x == dialogX || x == dialogX+dialogWidth-1 || y == dialogY || y == dialogY+dialogHeight-1 {
-						e.screen.SetContent(x, y, ' ', nil, style)
+					// Use border style for the edges, dialog style for interior
+					if x == dialogX || x == dialogX+dialogWidth-1 ||
+						y == dialogY || y == dialogY+dialogHeight-1 {
+						e.screen.SetContent(x, y, ' ', nil, borderStyle)
 					} else {
-						e.screen.SetContent(x, y, ' ', nil, style)
+						e.screen.SetContent(x, y, ' ', nil, dialogStyle)
 					}
 				}
 			}
@@ -524,9 +620,7 @@ func (e *Editor) promptSaveBeforeExit() bool {
 			x := dialogX + (dialogWidth-len(message))/2 + i
 			y := dialogY + 1
 			if x >= 0 && x < width && y >= 0 && y < height {
-				e.screen.SetContent(x, y, r, nil, tcell.StyleDefault.
-					Foreground(tcell.ColorBlack).
-					Background(tcell.ColorWhite))
+				e.screen.SetContent(x, y, r, nil, textStyle)
 			}
 		}
 
@@ -542,11 +636,10 @@ func (e *Editor) promptSaveBeforeExit() bool {
 				x := optionsX + j
 				y := dialogY + 3
 
-				style := tcell.StyleDefault
+				// Choose appropriate style based on selection
+				style := buttonStyle
 				if i == selected {
-					style = style.Foreground(tcell.ColorWhite).Background(tcell.ColorBlue)
-				} else {
-					style = style.Foreground(tcell.ColorBlack).Background(tcell.ColorWhite)
+					style = selectedStyle
 				}
 
 				if x >= 0 && x < width && y >= 0 && y < height {
@@ -592,19 +685,20 @@ func (e *Editor) promptSaveBeforeExit() bool {
 func (e *Editor) showMessage(message string) {
 	width, height := e.screen.Size()
 
+	// Create message style
+	messageStyle := tcell.StyleDefault.
+		Foreground(e.theme.DialogSelectedForeground).
+		Background(e.theme.DialogButtonBackground)
+
 	// Display message at the status line
 	for x := 0; x < width; x++ {
-		e.screen.SetContent(x, height-1, ' ', nil, tcell.StyleDefault.
-			Foreground(tcell.ColorYellow).
-			Background(tcell.ColorBlue))
+		e.screen.SetContent(x, height-1, ' ', nil, messageStyle)
 	}
 
 	// Write message
 	for i, r := range message {
 		if i < width {
-			e.screen.SetContent(i, height-1, r, nil, tcell.StyleDefault.
-				Foreground(tcell.ColorYellow).
-				Background(tcell.ColorBlue))
+			e.screen.SetContent(i, height-1, r, nil, messageStyle)
 		}
 	}
 
@@ -631,4 +725,28 @@ func loadFile(filePath string) ([]string, error) {
 	lines := strings.Split(string(content), "\n")
 
 	return lines, nil
+}
+
+// ensureVisibleCursor adjusts scroll position to keep cursor in view
+func (e *Editor) ensureVisibleCursor() {
+	_, height := e.screen.Size()
+	contentHeight := height - 1 // Leave space for status line
+
+	// If cursor is above the visible area, scroll up
+	if e.cursorY < e.scrollY {
+		e.scrollY = e.cursorY
+	}
+
+	// If cursor is below the visible area, scroll down
+	if e.cursorY >= e.scrollY+contentHeight {
+		e.scrollY = e.cursorY - contentHeight + 1
+	}
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
