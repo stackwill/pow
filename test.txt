@@ -1,0 +1,24 @@
+This is a test file for our text editor!
+hello there how are you doing
+i just jugged a band director recreated nano in like 30s
+i got a brand new saxophone
+
+i just jugged a band director
+
+i got a brand new saxophone
+
+du du du du u duu
+
+It supports multiple lines.
+You can use Ctrl+C to exit the editor.
+
+This is line 5.
+This is line 6.
+This is line 7.
+
+The editor currently just displays the content but doesn't 
+allow editing yet - we're focusing on the basic framework.
+
+
+
+End of file. 
