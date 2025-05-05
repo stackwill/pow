@@ -33,16 +33,23 @@ func NewEditor(filePath string) (*Editor, error) {
 	var content []string
 	fileExists := true
 
-	// Try to load the file if it exists
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		fileExists = false
+	// Check if a file path was provided
+	if filePath == "" {
 		content = []string{""}
-		fmt.Fprintln(os.Stderr, "New file")
+		fileExists = false
+		filePath = "untitled.txt" // Use a default filename but don't save yet
 	} else {
-		var err error
-		content, err = loadFile(filePath)
-		if err != nil {
-			return nil, err
+		// Try to load the file if it exists
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			fileExists = false
+			content = []string{""}
+			fmt.Fprintln(os.Stderr, "New file")
+		} else {
+			var err error
+			content, err = loadFile(filePath)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -148,8 +155,11 @@ func (e *Editor) draw() {
 	// Calculate the visible range of lines
 	visibleStart := e.scrollY
 	visibleEnd := e.scrollY + (height - 1) // Leave space for status line
-	if visibleEnd > len(e.content) {
-		visibleEnd = len(e.content)
+
+	// Allow displaying one line beyond content
+	maxVisibleEnd := len(e.content) + 1
+	if visibleEnd > maxVisibleEnd {
+		visibleEnd = maxVisibleEnd
 	}
 
 	// Render visible content
@@ -157,39 +167,43 @@ func (e *Editor) draw() {
 		// Calculate screen position
 		y := i - e.scrollY
 
-		line := e.content[i]
+		// Only render content if within actual content range
+		if i < len(e.content) {
+			line := e.content[i]
 
-		// Get the highlighted segments for this line
-		var colorSegments []syntax.ColorSegment
-		if i < len(highlightedLines) {
-			colorSegments = highlightedLines[i].Colors
-		}
-
-		// Draw the line with syntax highlighting
-		for x, r := range line {
-			if x >= width {
-				break
+			// Get the highlighted segments for this line
+			var colorSegments []syntax.ColorSegment
+			if i < len(highlightedLines) {
+				colorSegments = highlightedLines[i].Colors
 			}
 
-			// Skip cursor position, we'll draw it separately
-			if i == e.cursorY && x == e.cursorX {
-				continue
-			}
-
-			// Default to using the default style
-			style := defaultStyle
-
-			// Check if we have a highlighted segment that includes this position
-			for _, segment := range colorSegments {
-				if x >= segment.StartCol && x < segment.EndCol {
-					// Apply the highlight style but preserve background color
-					style = segment.Style.Background(e.theme.BackgroundColor)
+			// Draw the line with syntax highlighting
+			for x, r := range line {
+				if x >= width {
 					break
 				}
-			}
 
-			e.screen.SetContent(x, y, r, nil, style)
+				// Skip cursor position, we'll draw it separately
+				if i == e.cursorY && x == e.cursorX {
+					continue
+				}
+
+				// Default to using the default style
+				style := defaultStyle
+
+				// Check if we have a highlighted segment that includes this position
+				for _, segment := range colorSegments {
+					if x >= segment.StartCol && x < segment.EndCol {
+						// Apply the highlight style but preserve background color
+						style = segment.Style.Background(e.theme.BackgroundColor)
+						break
+					}
+				}
+
+				e.screen.SetContent(x, y, r, nil, style)
+			}
 		}
+		// The extra line beyond content is already drawn as empty space
 	}
 
 	// Draw cursor (only if it's in the visible area)
@@ -293,11 +307,16 @@ func (e *Editor) handleKeyEvent(ev *tcell.EventKey) bool {
 		return true
 
 	case tcell.KeyDown:
-		if e.cursorY < len(e.content)-1 {
+		// Allow moving to one line beyond content
+		maxY := len(e.content)
+		if e.cursorY < maxY {
 			e.cursorY++
-			// Make sure cursorX is not beyond end of line
-			if e.cursorX > len(e.content[e.cursorY]) {
+			// If we're on a regular line, adjust cursor X if needed
+			if e.cursorY < maxY && e.cursorX > len(e.content[e.cursorY]) {
 				e.cursorX = len(e.content[e.cursorY])
+			} else if e.cursorY == maxY {
+				// We're on the extra line beyond content
+				e.cursorX = 0
 			}
 		}
 		return true
@@ -313,10 +332,11 @@ func (e *Editor) handleKeyEvent(ev *tcell.EventKey) bool {
 		return true
 
 	case tcell.KeyRight:
+		// If we're on a normal line and can move right
 		if e.cursorY < len(e.content) && e.cursorX < len(e.content[e.cursorY]) {
 			e.cursorX++
-		} else if e.cursorY < len(e.content)-1 {
-			// Move to beginning of next line
+		} else if e.cursorY < len(e.content) {
+			// At the end of a normal line, move to the next line
 			e.cursorY++
 			e.cursorX = 0
 		}
@@ -363,7 +383,17 @@ func (e *Editor) handleKeyEvent(ev *tcell.EventKey) bool {
 		return true
 
 	case tcell.KeyEnter:
-		// Split the current line at cursor position
+		// Handle enter at the extra line - append a new line
+		if e.cursorY == len(e.content) {
+			// Add a new empty line
+			e.content = append(e.content, "")
+			e.cursorY = len(e.content) - 1
+			e.cursorX = 0
+			e.modified = true
+			return true
+		}
+
+		// Normal case - split the current line at cursor position
 		currentLine := e.content[e.cursorY]
 		leftPart := currentLine[:e.cursorX]
 		rightPart := ""
@@ -475,7 +505,7 @@ func (e *Editor) handleKeyEvent(ev *tcell.EventKey) bool {
 
 // saveFile saves the current content to the file
 func (e *Editor) saveFile() {
-	// If it's a new file and no path is set, prompt for a filename
+	// If no path is set, prompt for a filename
 	if e.filePath == "" {
 		e.promptForFilename()
 		return
@@ -497,12 +527,25 @@ func (e *Editor) saveFile() {
 
 // promptForFilename asks the user for a filename to save
 func (e *Editor) promptForFilename() {
-	// Save current content to restore it later
 	width, height := e.screen.Size()
 
+	// Dialog dimensions
+	dialogWidth := min(60, width-4)
+	dialogHeight := 5
+	dialogX := (width - dialogWidth) / 2
+	dialogY := (height - dialogHeight) / 2
+
 	// Create styles
-	promptStyle := tcell.StyleDefault.
-		Foreground(e.theme.DialogButtonForeground).
+	dialogStyle := tcell.StyleDefault.
+		Foreground(e.theme.DialogForeground).
+		Background(e.theme.DialogBackground)
+
+	borderStyle := tcell.StyleDefault.
+		Foreground(e.theme.DialogBorderColor).
+		Background(e.theme.DialogBackground)
+
+	titleStyle := tcell.StyleDefault.
+		Foreground(e.theme.DialogSelectedForeground).
 		Background(e.theme.DialogButtonBackground)
 
 	inputStyle := tcell.StyleDefault.
@@ -516,25 +559,47 @@ func (e *Editor) promptForFilename() {
 	// Create an input field at the bottom of the screen
 	prompt := "Enter filename: "
 	input := ""
+	title := " Save File "
 
 	// Process input until Enter or Esc is pressed
 	for {
-		// Clear the status line
-		for x := 0; x < width; x++ {
-			e.screen.SetContent(x, height-1, ' ', nil, inputStyle)
+		// Draw dialog background
+		for y := dialogY; y < dialogY+dialogHeight; y++ {
+			for x := dialogX; x < dialogX+dialogWidth; x++ {
+				// Simple rectangle with solid background
+				if y == dialogY || y == dialogY+dialogHeight-1 ||
+					x == dialogX || x == dialogX+dialogWidth-1 {
+					e.screen.SetContent(x, y, ' ', nil, borderStyle)
+				} else {
+					e.screen.SetContent(x, y, ' ', nil, dialogStyle)
+				}
+			}
 		}
 
-		// Display prompt and input
+		// Draw title
+		titleX := dialogX + (dialogWidth-len(title))/2
+		for i, c := range title {
+			if titleX+i >= dialogX && titleX+i < dialogX+dialogWidth-1 {
+				e.screen.SetContent(titleX+i, dialogY, c, nil, titleStyle)
+			}
+		}
+
+		// Draw prompt
+		promptX := dialogX + 2
 		for i, c := range prompt {
-			e.screen.SetContent(i, height-1, c, nil, promptStyle)
+			e.screen.SetContent(promptX+i, dialogY+2, c, nil, inputStyle)
 		}
 
+		// Draw input
+		inputX := promptX + len(prompt)
 		for i, c := range input {
-			e.screen.SetContent(len(prompt)+i, height-1, c, nil, inputStyle)
+			if inputX+i < dialogX+dialogWidth-2 {
+				e.screen.SetContent(inputX+i, dialogY+2, c, nil, inputStyle)
+			}
 		}
 
 		// Show cursor
-		e.screen.SetContent(len(prompt)+len(input), height-1, ' ', nil, cursorStyle)
+		e.screen.SetContent(inputX+len(input), dialogY+2, ' ', nil, cursorStyle)
 
 		e.screen.Show()
 
@@ -547,16 +612,25 @@ func (e *Editor) promptForFilename() {
 				if input != "" {
 					e.filePath = input
 					e.saveFile()
+					// Update highlighter in case file type changed
+					e.highlighter = syntax.NewHighlighter(e.filePath)
 					return
 				}
 			case tcell.KeyEscape:
+				// If no filename is set and user cancels, use a default name
+				if e.filePath == "" {
+					e.filePath = "untitled.txt"
+				}
 				return
 			case tcell.KeyBackspace, tcell.KeyBackspace2:
 				if len(input) > 0 {
 					input = input[:len(input)-1]
 				}
 			case tcell.KeyRune:
-				input += string(ev.Rune())
+				// Only add the character if it would fit in the dialog
+				if inputX+len(input) < dialogX+dialogWidth-3 {
+					input += string(ev.Rune())
+				}
 			}
 		}
 	}
@@ -567,86 +641,120 @@ func (e *Editor) promptSaveBeforeExit() bool {
 	width, height := e.screen.Size()
 
 	// Options
-	options := []string{"Yes", "No", "Cancel"}
+	options := []string{"Save", "Don't Save", "Cancel"}
 	selected := 0
 
 	message := "Save changes before exiting?"
 
+	// Dialog dimensions
+	dialogWidth := min(50, width-4)
+	dialogHeight := 7
+	dialogX := (width - dialogWidth) / 2
+	dialogY := (height - dialogHeight) / 2
+
+	// Create styles
+	dialogStyle := tcell.StyleDefault.
+		Foreground(e.theme.DialogForeground).
+		Background(e.theme.DialogBackground)
+
+	borderStyle := tcell.StyleDefault.
+		Foreground(e.theme.DialogBorderColor).
+		Background(e.theme.DialogBackground)
+
+	titleStyle := tcell.StyleDefault.
+		Foreground(e.theme.DialogSelectedForeground).
+		Background(e.theme.DialogButtonBackground)
+
+	textStyle := tcell.StyleDefault.
+		Foreground(e.theme.DialogForeground).
+		Background(e.theme.DialogBackground)
+
+	buttonStyle := tcell.StyleDefault.
+		Foreground(e.theme.DialogButtonForeground).
+		Background(e.theme.DialogButtonBackground)
+
+	selectedStyle := tcell.StyleDefault.
+		Foreground(e.theme.DialogSelectedForeground).
+		Background(e.theme.DialogSelectedBackground)
+
+	title := " Confirm Exit "
+
 	for {
 		// Clear the dialog area
-		dialogWidth := 40
-		dialogHeight := 5
-		dialogX := (width - dialogWidth) / 2
-		dialogY := (height - dialogHeight) / 2
-
-		// Create dialog styles
-		dialogStyle := tcell.StyleDefault.
-			Foreground(e.theme.DialogForeground).
-			Background(e.theme.DialogBackground)
-
-		borderStyle := tcell.StyleDefault.
-			Foreground(e.theme.DialogBorderColor).
-			Background(e.theme.DialogBackground)
-
-		textStyle := tcell.StyleDefault.
-			Foreground(e.theme.DialogForeground).
-			Background(e.theme.DialogBackground)
-
-		buttonStyle := tcell.StyleDefault.
-			Foreground(e.theme.DialogButtonForeground).
-			Background(e.theme.DialogButtonBackground)
-
-		selectedStyle := tcell.StyleDefault.
-			Foreground(e.theme.DialogSelectedForeground).
-			Background(e.theme.DialogSelectedBackground)
-
-		// Draw dialog background and border
 		for y := dialogY; y < dialogY+dialogHeight; y++ {
 			for x := dialogX; x < dialogX+dialogWidth; x++ {
-				if x >= 0 && x < width && y >= 0 && y < height {
-					// Use border style for the edges, dialog style for interior
-					if x == dialogX || x == dialogX+dialogWidth-1 ||
-						y == dialogY || y == dialogY+dialogHeight-1 {
-						e.screen.SetContent(x, y, ' ', nil, borderStyle)
-					} else {
-						e.screen.SetContent(x, y, ' ', nil, dialogStyle)
-					}
+				// Simple rectangle with solid background
+				if y == dialogY || y == dialogY+dialogHeight-1 ||
+					x == dialogX || x == dialogX+dialogWidth-1 {
+					e.screen.SetContent(x, y, ' ', nil, borderStyle)
+				} else {
+					e.screen.SetContent(x, y, ' ', nil, dialogStyle)
 				}
+			}
+		}
+
+		// Draw title
+		titleX := dialogX + (dialogWidth-len(title))/2
+		for i, c := range title {
+			if titleX+i >= dialogX && titleX+i < dialogX+dialogWidth-1 {
+				e.screen.SetContent(titleX+i, dialogY, c, nil, titleStyle)
 			}
 		}
 
 		// Draw message
 		for i, r := range message {
 			x := dialogX + (dialogWidth-len(message))/2 + i
-			y := dialogY + 1
-			if x >= 0 && x < width && y >= 0 && y < height {
+			y := dialogY + 2
+			if x >= dialogX && x < dialogX+dialogWidth-1 {
 				e.screen.SetContent(x, y, r, nil, textStyle)
 			}
 		}
 
-		// Draw options
-		optionsWidth := 0
+		// Draw buttons
+		buttonY := dialogY + 4
+
+		// Calculate total width of all buttons with spacing
+		totalButtonWidth := 0
 		for _, opt := range options {
-			optionsWidth += len(opt) + 2 // Add space between options
+			totalButtonWidth += len(opt) + 4 // Add padding around button text
 		}
-		optionsX := dialogX + (dialogWidth-optionsWidth)/2
+		totalButtonWidth += (len(options) - 1) * 2 // Add spacing between buttons
+
+		// Start position for first button
+		buttonX := dialogX + (dialogWidth-totalButtonWidth)/2
 
 		for i, opt := range options {
-			for j, r := range opt {
-				x := optionsX + j
-				y := dialogY + 3
+			// Draw button with simple background
+			buttonWidth := len(opt) + 4
 
-				// Choose appropriate style based on selection
+			// Button background
+			for y := buttonY; y <= buttonY+2; y++ {
+				for x := buttonX; x < buttonX+buttonWidth; x++ {
+					style := buttonStyle
+					if i == selected {
+						style = selectedStyle
+					}
+					e.screen.SetContent(x, y, ' ', nil, style)
+				}
+			}
+
+			// Button text
+			for j, r := range opt {
+				x := buttonX + 2 + j // Position text with padding
+				y := buttonY + 1     // Center text vertically
+
 				style := buttonStyle
 				if i == selected {
 					style = selectedStyle
 				}
 
-				if x >= 0 && x < width && y >= 0 && y < height {
+				if x >= dialogX && x < dialogX+dialogWidth-1 {
 					e.screen.SetContent(x, y, r, nil, style)
 				}
 			}
-			optionsX += len(opt) + 2 // Move to next option position
+
+			// Move to next button position
+			buttonX += buttonWidth + 2
 		}
 
 		e.screen.Show()
@@ -662,12 +770,16 @@ func (e *Editor) promptSaveBeforeExit() bool {
 				selected = (selected + 1) % len(options)
 			case tcell.KeyEnter:
 				switch selected {
-				case 0: // Yes
-					e.saveFile()
+				case 0: // Save
+					if e.filePath == "" {
+						e.promptForFilename()
+					} else {
+						e.saveFile()
+					}
 					close(e.quit)
 					e.screen.Fini()
 					return false
-				case 1: // No
+				case 1: // Don't Save
 					close(e.quit)
 					e.screen.Fini()
 					return false
@@ -685,27 +797,65 @@ func (e *Editor) promptSaveBeforeExit() bool {
 func (e *Editor) showMessage(message string) {
 	width, height := e.screen.Size()
 
-	// Create message style
-	messageStyle := tcell.StyleDefault.
+	// Dialog dimensions
+	dialogWidth := min(len(message)+8, width-4)
+	dialogHeight := 5
+	dialogX := (width - dialogWidth) / 2
+	dialogY := (height - dialogHeight) / 2
+
+	// Create styles
+	dialogStyle := tcell.StyleDefault.
+		Foreground(e.theme.DialogForeground).
+		Background(e.theme.DialogBackground)
+
+	borderStyle := tcell.StyleDefault.
+		Foreground(e.theme.DialogBorderColor).
+		Background(e.theme.DialogBackground)
+
+	titleStyle := tcell.StyleDefault.
 		Foreground(e.theme.DialogSelectedForeground).
 		Background(e.theme.DialogButtonBackground)
 
-	// Display message at the status line
-	for x := 0; x < width; x++ {
-		e.screen.SetContent(x, height-1, ' ', nil, messageStyle)
-	}
+	textStyle := tcell.StyleDefault.
+		Foreground(e.theme.DialogForeground).
+		Background(e.theme.DialogBackground)
 
-	// Write message
-	for i, r := range message {
-		if i < width {
-			e.screen.SetContent(i, height-1, r, nil, messageStyle)
-		}
-	}
+	title := " Message "
 
-	e.screen.Show()
-
-	// Wait for a key event to dismiss the message
+	// Draw dialog
 	for {
+		// Draw dialog background and border
+		for y := dialogY; y < dialogY+dialogHeight; y++ {
+			for x := dialogX; x < dialogX+dialogWidth; x++ {
+				// Simple rectangle with solid background
+				if y == dialogY || y == dialogY+dialogHeight-1 ||
+					x == dialogX || x == dialogX+dialogWidth-1 {
+					e.screen.SetContent(x, y, ' ', nil, borderStyle)
+				} else {
+					e.screen.SetContent(x, y, ' ', nil, dialogStyle)
+				}
+			}
+		}
+
+		// Draw title
+		titleX := dialogX + (dialogWidth-len(title))/2
+		for i, c := range title {
+			if titleX+i >= dialogX && titleX+i < dialogX+dialogWidth-1 {
+				e.screen.SetContent(titleX+i, dialogY, c, nil, titleStyle)
+			}
+		}
+
+		// Write message
+		msgX := dialogX + (dialogWidth-len(message))/2
+		for i, r := range message {
+			if msgX+i >= dialogX && msgX+i < dialogX+dialogWidth-1 {
+				e.screen.SetContent(msgX+i, dialogY+2, r, nil, textStyle)
+			}
+		}
+
+		e.screen.Show()
+
+		// Wait for a key event to dismiss the message
 		ev := e.screen.PollEvent()
 		switch ev.(type) {
 		case *tcell.EventKey:
@@ -731,6 +881,13 @@ func loadFile(filePath string) ([]string, error) {
 func (e *Editor) ensureVisibleCursor() {
 	_, height := e.screen.Size()
 	contentHeight := height - 1 // Leave space for status line
+
+	// Ensure cursor position is valid
+	maxY := len(e.content)
+	if e.cursorY > maxY {
+		e.cursorY = maxY
+		e.cursorX = 0
+	}
 
 	// If cursor is above the visible area, scroll up
 	if e.cursorY < e.scrollY {
