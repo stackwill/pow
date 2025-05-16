@@ -1,17 +1,22 @@
 # Pow Editor (TUI)
 
-A simple text editor with Terminal User Interface (TUI) written in Go.
+A simple TUI text editor
 
-## Features (Planned)
+Lots of inspiration for Design comes from GNU Nano, the intention is to make a Nano-like experience with syntax highlighting, user theming and other basic improvements.
 
-- File loading and display (implemented)
+## Features
+
+- **Theming Engine**
 - Text navigation
 - Text editing
 - Syntax highlighting
 - Save functionality
-- Search and replace
+- Search
 
-## Usage
+# Theming
+
+Set the theme of the editor through the /.config/themes
+## Run
 
 ```bash
 go run main.go <filename>
@@ -31,11 +36,8 @@ For example:
 
 - Ctrl+C: Exit the editor
 
-## Dependencies
 
-- [tcell](https://github.com/gdamore/tcell) - Terminal handling
-- [tview](https://github.com/rivo/tview) - Terminal UI widgets
 
 ## Development
 
-This is a basic framework for a text editor. More features will be added in the future. 
+Cursor was heavily used in the development of Pow. The main model used was Claude 3.7.

@@ -38,6 +38,7 @@ type Theme struct {
 	// Status line colors
 	StatusBackground tcell.Color
 	StatusForeground tcell.Color
+	StatusIconColor  tcell.Color
 
 	// Dialog colors
 	DialogBackground         tcell.Color
@@ -47,34 +48,54 @@ type Theme struct {
 	DialogButtonForeground   tcell.Color
 	DialogSelectedBackground tcell.Color
 	DialogSelectedForeground tcell.Color
+
+	// Icons - using runes for better character handling
+	IconSave       rune
+	IconExit       rune
+	IconFind       rune
+	IconFile       rune
+	IconModified   rune
+	IconPosition   rune
+	IconPercentage rune
 }
 
 // LoadTheme loads color configuration from the specified file
 func LoadTheme(configPath string) (*Theme, error) {
-	// Get the theme filename from the main config
-	themePath, err := getThemePathFromConfig(configPath)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		// If we can't read the config, try the legacy path
-		themePath = filepath.Join(filepath.Dir(configPath), "themes", "theme.conf")
-	}
-
-	// Default theme (fallback)
+	// Create default theme first (fallback)
 	theme := &Theme{
 		BackgroundColor:  tcell.NewRGBColor(40, 44, 52),    // Dark background
 		TextColor:        tcell.NewRGBColor(220, 223, 228), // Light text
 		CursorColor:      tcell.NewRGBColor(255, 165, 0),   // Orange cursor
-		StatusBackground: tcell.NewRGBColor(110, 118, 129), // Medium gray status bar
+		StatusBackground: tcell.NewRGBColor(45, 50, 60),    // Darker status bar
 		StatusForeground: tcell.ColorBlack,                 // Black text for status
+		StatusIconColor:  tcell.NewRGBColor(147, 197, 253), // Light blue for icons
 
 		// Default dialog colors
-		DialogBackground:         tcell.NewRGBColor(220, 220, 220), // Light gray dialog bg
-		DialogForeground:         tcell.NewRGBColor(30, 30, 30),    // Dark text
-		DialogBorderColor:        tcell.NewRGBColor(180, 180, 180), // Gray border
-		DialogButtonBackground:   tcell.NewRGBColor(60, 110, 180),  // Blue button bg
+		DialogBackground:         tcell.NewRGBColor(40, 45, 55),    // Dark dialog bg
+		DialogForeground:         tcell.NewRGBColor(230, 230, 230), // Light text
+		DialogBorderColor:        tcell.NewRGBColor(80, 90, 110),   // Dark border
+		DialogButtonBackground:   tcell.NewRGBColor(70, 100, 170),  // Blue button bg
 		DialogButtonForeground:   tcell.NewRGBColor(240, 240, 240), // White button text
-		DialogSelectedBackground: tcell.NewRGBColor(0, 120, 215),   // Bright blue selection
+		DialogSelectedBackground: tcell.NewRGBColor(100, 140, 210), // Bright blue selection
 		DialogSelectedForeground: tcell.NewRGBColor(255, 255, 255), // White selected text
+
+		// Default icons
+		IconSave:       '󰆓',
+		IconExit:       '󰅚',
+		IconFind:       '󰍉',
+		IconFile:       '󰈔',
+		IconModified:   '󰆓',
+		IconPosition:   '󰦪',
+		IconPercentage: '󰎚',
+	}
+
+	// Get the theme filename from the main config
+	themePath, err := getThemePathFromConfig(configPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		// If we can't read the config, use the default theme path
+		// Ensure we use a path relative to the application
+		themePath = filepath.Join("config", "themes", "theme.conf")
 	}
 
 	// Try to open the theme file
@@ -82,15 +103,11 @@ func LoadTheme(configPath string) (*Theme, error) {
 	if err != nil {
 		// Check if it's just that the file doesn't exist
 		if os.IsNotExist(err) {
-			return theme, &ThemeError{
-				ConfigPath: themePath,
-				Err:        fmt.Errorf("theme file not found, using defaults"),
-			}
+			fmt.Fprintf(os.Stderr, "Theme file not found at '%s', using defaults\n", themePath)
+			return theme, nil
 		}
-		return theme, &ThemeError{
-			ConfigPath: themePath,
-			Err:        fmt.Errorf("failed to open theme file: %w", err),
-		}
+		fmt.Fprintf(os.Stderr, "Failed to open theme file '%s', using defaults: %v\n", themePath, err)
+		return theme, nil
 	}
 	defer file.Close()
 
@@ -111,16 +128,35 @@ func LoadTheme(configPath string) (*Theme, error) {
 		// Parse color setting (key = value)
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {
-			return nil, &ThemeError{
-				ConfigPath: themePath,
-				LineNum:    lineNum,
-				LineText:   lineText,
-				Err:        fmt.Errorf("invalid syntax, expected 'key = value'"),
-			}
+			fmt.Fprintf(os.Stderr, "Invalid syntax in theme file '%s' line %d, expected 'key = value'\n", themePath, lineNum)
+			continue
 		}
 
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
+
+		// Handle icon settings
+		if strings.HasPrefix(key, "icon_") {
+			// Process single rune icon
+			iconRune := []rune(value)[0]
+			switch key {
+			case "icon_save":
+				theme.IconSave = iconRune
+			case "icon_exit":
+				theme.IconExit = iconRune
+			case "icon_find":
+				theme.IconFind = iconRune
+			case "icon_file":
+				theme.IconFile = iconRune
+			case "icon_modified":
+				theme.IconModified = iconRune
+			case "icon_position":
+				theme.IconPosition = iconRune
+			case "icon_percentage":
+				theme.IconPercentage = iconRune
+			}
+			continue
+		}
 
 		// Parse the color value
 		var color tcell.Color
@@ -135,12 +171,8 @@ func LoadTheme(configPath string) (*Theme, error) {
 		}
 
 		if parseErr != nil {
-			return nil, &ThemeError{
-				ConfigPath: themePath,
-				LineNum:    lineNum,
-				LineText:   lineText,
-				Err:        fmt.Errorf("invalid color value: %w", parseErr),
-			}
+			fmt.Fprintf(os.Stderr, "Invalid color value in theme file '%s' line %d: %v\n", themePath, lineNum, parseErr)
+			continue
 		}
 
 		// Assign color to the correct field
@@ -155,6 +187,8 @@ func LoadTheme(configPath string) (*Theme, error) {
 			theme.StatusBackground = color
 		case "status_fg":
 			theme.StatusForeground = color
+		case "status_icon":
+			theme.StatusIconColor = color
 		case "dialog_bg":
 			theme.DialogBackground = color
 		case "dialog_fg":
@@ -170,21 +204,13 @@ func LoadTheme(configPath string) (*Theme, error) {
 		case "dialog_selected_fg":
 			theme.DialogSelectedForeground = color
 		default:
-			return nil, &ThemeError{
-				ConfigPath: themePath,
-				LineNum:    lineNum,
-				LineText:   lineText,
-				Err:        fmt.Errorf("unknown color setting: %s", key),
-			}
+			fmt.Fprintf(os.Stderr, "Unknown color setting in theme file '%s' line %d: %s\n", themePath, lineNum, key)
 		}
 	}
 
 	// Check for scanner errors
 	if err := scanner.Err(); err != nil {
-		return nil, &ThemeError{
-			ConfigPath: themePath,
-			Err:        fmt.Errorf("error reading theme file: %w", err),
-		}
+		fmt.Fprintf(os.Stderr, "Error reading theme file '%s': %v\n", themePath, err)
 	}
 
 	return theme, nil
@@ -192,10 +218,10 @@ func LoadTheme(configPath string) (*Theme, error) {
 
 // getThemePathFromConfig reads the main config file to determine which theme to use
 func getThemePathFromConfig(configPath string) (string, error) {
-	// Get the config directory
-	configDir := filepath.Dir(configPath)
+	// Always use paths relative to the application
+	configDir := "config"
 
-	// Path to the main config file
+	// Path to the main config file - always use local config.conf
 	mainConfigPath := filepath.Join(configDir, "config.conf")
 
 	// Default theme path
@@ -203,13 +229,13 @@ func getThemePathFromConfig(configPath string) (string, error) {
 
 	// Check if the main config file exists
 	if _, err := os.Stat(mainConfigPath); os.IsNotExist(err) {
-		return defaultThemePath, fmt.Errorf("config file not found, using default theme")
+		return defaultThemePath, fmt.Errorf("config file not found at '%s', using default theme", mainConfigPath)
 	}
 
 	// Open the config file
 	file, err := os.Open(mainConfigPath)
 	if err != nil {
-		return defaultThemePath, fmt.Errorf("failed to open config file: %w", err)
+		return defaultThemePath, fmt.Errorf("failed to open config file '%s': %w", mainConfigPath, err)
 	}
 	defer file.Close()
 
@@ -234,8 +260,15 @@ func getThemePathFromConfig(configPath string) (string, error) {
 
 		// Look for the theme setting
 		if key == "theme" {
-			// Build the path to the theme file
+			// Build the path to the theme file, always using local config
 			themePath := filepath.Join(configDir, "themes", value)
+
+			// Verify the theme file exists
+			if _, err := os.Stat(themePath); os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "Theme file '%s' not found, falling back to default\n", themePath)
+				return defaultThemePath, nil
+			}
+
 			return themePath, nil
 		}
 	}
