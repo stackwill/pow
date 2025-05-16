@@ -15,7 +15,9 @@ Lots of inspiration for Design comes from GNU Nano, the intention is to make a N
 
 # Theming
 
-Set the theme of the editor through the /.config/themes
+Set the theme of the editor in the config/config.conf file
+Themes are stored in the config/themes/ directory, where there are already theme templates to build on or use.
+
 ## Run
 
 ```bash
