@@ -1,4 +1,4 @@
-# Pow Editor (TUI)
+# Pow
 
 A simple TUI text editor
 
